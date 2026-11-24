@@ -1,0 +1,8 @@
+{
+  "name": "Remix HEMOLOG HDHL",
+  "description": "Aplikasi web real-time untuk pencatatan logbook tindakan keperawatan hemodialisa, verifikasi berjenjang, jadwal dinas, dan pelaporan klinis unit hemodialisa berbasis Supabase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,422 @@
+import React, { Component, Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { Activity, AlertTriangle } from 'lucide-react';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { ToastProvider } from './context/ToastContext';
+import { useUnitData } from './hooks/useUnitData';
+import { useIdleTimeout } from './hooks/useIdleTimeout';
+import { RoleGuard } from './components/auth/RoleGuard';
+import { SidebarLayout } from './components/layout/SidebarLayout';
+import { OfflineIndicator } from './components/ui/OfflineIndicator';
+import { reconnectDb } from './lib/supabaseDb';
+import { isLogbookAssignedToVerifier } from './lib/formatters';
+import { ROLE_MENUS, type MenuId } from './types';
+
+const loadLoginPage = () =>
+  import('./components/auth/LoginPage').then((m) => ({ default: m.LoginPage }));
+const loadIdleTimeoutModal = () =>
+  import('./components/auth/IdleTimeoutModal').then((m) => ({ default: m.IdleTimeoutModal }));
+
+const pageLoaders: Record<MenuId, () => Promise<{ default: React.ComponentType<any> }>> = {
+  dashboard: () => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })),
+  logbook: () => import('./pages/LogbookPage').then((m) => ({ default: m.LogbookPage })),
+  master_logbook: () => import('./pages/LogbookPage').then((m) => ({ default: m.LogbookPage })),
+  verifikasi: () => import('./pages/VerificationPage').then((m) => ({ default: m.VerificationPage })),
+  riwayat: () => import('./pages/HistoryPage').then((m) => ({ default: m.HistoryPage })),
+  laporan_pasien: () => import('./pages/PatientReportsPage').then((m) => ({ default: m.PatientReportsPage })),
+  laporan_pj_shift: () => import('./pages/PjShiftReportsPage').then((m) => ({ default: m.PjShiftReportsPage })),
+  laporan_bulanan: () => import('./pages/MonthlyReportsPage').then((m) => ({ default: m.MonthlyReportsPage })),
+  jadwal_dinas: () => import('./pages/SchedulesPage').then((m) => ({ default: m.SchedulesPage })),
+  data_pasien: () => import('./pages/PatientsPage').then((m) => ({ default: m.PatientsPage })),
+  data_dokter: () => import('./pages/DoctorsPage').then((m) => ({ default: m.DoctorsPage })),
+  data_mesin: () => import('./pages/MachinesPage').then((m) => ({ default: m.MachinesPage })),
+  data_akun: () => import('./pages/AccountsPage').then((m) => ({ default: m.AccountsPage })),
+  my_account: () => import('./pages/MyAccountPage').then((m) => ({ default: m.MyAccountPage })),
+};
+
+const LoginPage = lazy(loadLoginPage);
+const IdleTimeoutModal = lazy(loadIdleTimeoutModal);
+const DashboardPage = lazy(pageLoaders.dashboard);
+const LogbookPage = lazy(pageLoaders.logbook);
+const VerificationPage = lazy(pageLoaders.verifikasi);
+const HistoryPage = lazy(pageLoaders.riwayat);
+const PatientReportsPage = lazy(pageLoaders.laporan_pasien);
+const PjShiftReportsPage = lazy(pageLoaders.laporan_pj_shift);
+const MonthlyReportsPage = lazy(pageLoaders.laporan_bulanan);
+const SchedulesPage = lazy(pageLoaders.jadwal_dinas);
+const PatientsPage = lazy(pageLoaders.data_pasien);
+const DoctorsPage = lazy(pageLoaders.data_dokter);
+const MachinesPage = lazy(pageLoaders.data_mesin);
+const AccountsPage = lazy(pageLoaders.data_akun);
+const MyAccountPage = lazy(pageLoaders.my_account);
+
+function PageSkeleton() {
+  return (
+    <div className="space-y-4">
+      <div className="h-24 rounded-xl border border-slate-200 bg-white animate-pulse" />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="h-28 rounded-xl border border-slate-200 bg-white animate-pulse" />
+        <div className="h-28 rounded-xl border border-slate-200 bg-white animate-pulse" />
+        <div className="h-28 rounded-xl border border-slate-200 bg-white animate-pulse" />
+      </div>
+      <div className="h-72 rounded-xl border border-slate-200 bg-white animate-pulse" />
+    </div>
+  );
+}
+
+class ErrorBoundary extends Component<
+  { children: React.ReactNode },
+  { hasError: boolean; message: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, message: error.message };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+          <div className="max-w-lg w-full rounded-xl border border-rose-200 bg-white p-6 text-center shadow-sm">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-50 text-rose-600">
+              <AlertTriangle className="h-6 w-6" />
+            </div>
+            <h2 className="mt-4 font-display text-lg font-bold text-slate-900">
+              Terjadi Kendala Koneksi / Akses Data
+            </h2>
+            <p className="mt-2 text-xs text-slate-600 break-words">{this.state.message}</p>
+            <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  void reconnectDb(true);
+                  this.setState({ hasError: false, message: '' });
+                }}
+                className="rounded-lg bg-teal-600 px-4 py-2 text-xs font-semibold text-white hover:bg-teal-700"
+              >
+                Coba Sambungkan Ulang
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Muat Ulang Aplikasi
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function WorkspaceShell() {
+  const {
+    authUser,
+    userProfile,
+    authReady,
+    profileLoading,
+    logout,
+    logoutDueToIdle,
+  } = useAuth();
+  const [activeMenu, setActiveMenu] = useState<MenuId>('dashboard');
+
+  const isAuthenticated = authReady && !profileLoading && Boolean(authUser && userProfile);
+  const { showWarning, remainingSeconds, resetActivity } = useIdleTimeout({
+    enabled: isAuthenticated,
+    onTimeout: logoutDueToIdle,
+  });
+
+  const {
+    loading,
+    patients,
+    doctors,
+    machines,
+    actionCategories,
+    staffDirectory,
+    allUsers,
+    ownLogbooks,
+    approvedLogbooks,
+    allLogbooks,
+    logbookLocks,
+    machineLocks,
+    schedules,
+    pjShiftAssignments,
+    doctorSchedules,
+    allReports,
+    formTemplate,
+  } = useUnitData();
+
+  const prefetchMenu = useCallback((menuId: MenuId) => {
+    const loader = pageLoaders[menuId];
+    if (loader) {
+      void loader().catch(() => undefined);
+    }
+  }, []);
+
+  // Keep activeMenu valid when role changes
+  useEffect(() => {
+    if (!userProfile) return;
+    const allowed = ROLE_MENUS[userProfile.role]?.map((m) => m.id) || ['dashboard'];
+    if (!allowed.includes(activeMenu)) {
+      setActiveMenu('dashboard');
+    }
+  }, [userProfile?.role, activeMenu]);
+
+  // Warm the most frequent role routes during browser idle so tab switches are instant
+  useEffect(() => {
+    if (!isAuthenticated || !userProfile) return;
+    const allowedIds = (ROLE_MENUS[userProfile.role] || []).map((m) => m.id);
+    const priorityMenus: MenuId[] = ['logbook', 'verifikasi', 'master_logbook', 'laporan_bulanan', 'riwayat'];
+    const targets = priorityMenus.filter((id) => allowedIds.includes(id));
+
+    const runPrefetch = () => {
+      targets.forEach((id) => {
+        void pageLoaders[id]?.().catch(() => undefined);
+      });
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(runPrefetch, { timeout: 1500 });
+      return () => {
+        if (typeof window.cancelIdleCallback === 'function') {
+          window.cancelIdleCallback(idleId);
+        }
+      };
+    }
+
+    const timer = globalThis.setTimeout(runPrefetch, 900);
+    return () => globalThis.clearTimeout(timer);
+  }, [isAuthenticated, userProfile?.role]);
+
+  const pendingVerificationCount = useMemo(
+    () =>
+      allLogbooks.filter(
+        (l) =>
+          l.verificationStatus === 'Pending' &&
+          isLogbookAssignedToVerifier(l, userProfile)
+      ).length,
+    [allLogbooks, userProfile]
+  );
+
+  if (!authReady || profileLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-teal-600 text-white">
+          <Activity className="h-6 w-6 animate-pulse" />
+        </div>
+        <p className="text-sm font-medium text-slate-600">
+          Menghubungkan ke Unit Hemodialisa...
+        </p>
+      </div>
+    );
+  }
+
+  if (!authUser || !userProfile) {
+    return (
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0B5A8E] text-white">
+              <Activity className="h-6 w-6 animate-pulse" />
+            </div>
+            <p className="text-sm font-medium text-slate-600">Memuat halaman masuk...</p>
+          </div>
+        }
+      >
+        <LoginPage />
+      </Suspense>
+    );
+  }
+
+  const renderPage = () => {
+    if (loading && allLogbooks.length === 0 && patients.length === 0) {
+      return <PageSkeleton />;
+    }
+
+    switch (activeMenu) {
+      case 'dashboard':
+        return (
+          <DashboardPage
+            logbooks={allLogbooks}
+            approvedLogbooks={approvedLogbooks}
+            patients={patients}
+            doctors={doctors}
+            machines={machines}
+            staffDirectory={staffDirectory}
+            schedules={schedules}
+            onNavigate={setActiveMenu}
+          />
+        );
+      case 'logbook':
+        return (
+          <LogbookPage
+            mode="nurse"
+            logbooks={allLogbooks}
+            logbookLocks={logbookLocks}
+            machineLocks={machineLocks}
+            patients={patients}
+            doctors={doctors}
+            machines={machines}
+            actionCategories={actionCategories}
+            staffDirectory={staffDirectory}
+            schedules={schedules}
+            doctorSchedules={doctorSchedules}
+            pjShiftAssignments={pjShiftAssignments}
+            formTemplate={formTemplate}
+          />
+        );
+      case 'master_logbook':
+        return (
+          <LogbookPage
+            mode="master"
+            logbooks={allLogbooks}
+            logbookLocks={logbookLocks}
+            machineLocks={machineLocks}
+            patients={patients}
+            doctors={doctors}
+            machines={machines}
+            actionCategories={actionCategories}
+            staffDirectory={staffDirectory}
+            schedules={schedules}
+            doctorSchedules={doctorSchedules}
+            pjShiftAssignments={pjShiftAssignments}
+            formTemplate={formTemplate}
+          />
+        );
+      case 'verifikasi':
+        return (
+          <VerificationPage
+            logbooks={allLogbooks}
+            logbookLocks={logbookLocks}
+            machineLocks={machineLocks}
+            patients={patients}
+            doctors={doctors}
+            machines={machines}
+            actionCategories={actionCategories}
+            staffDirectory={staffDirectory}
+            formTemplate={formTemplate}
+          />
+        );
+      case 'riwayat':
+        return (
+          <HistoryPage
+            logbooks={ownLogbooks}
+            reports={allReports}
+            patients={patients}
+            doctors={doctors}
+            machines={machines}
+            actionCategories={actionCategories}
+            staffDirectory={staffDirectory}
+            machineLocks={machineLocks}
+            formTemplate={formTemplate}
+          />
+        );
+      case 'laporan_pasien':
+        return (
+          <PatientReportsPage
+            patients={patients}
+            logbooks={allLogbooks}
+            reports={allReports}
+            machines={machines}
+            staffDirectory={staffDirectory}
+            pjShiftAssignments={pjShiftAssignments}
+            formTemplate={formTemplate}
+          />
+        );
+      case 'laporan_pj_shift':
+        return (
+          <PjShiftReportsPage
+            reports={allReports}
+            logbooks={allLogbooks}
+            patients={patients}
+            machines={machines}
+            schedules={schedules}
+            doctorSchedules={doctorSchedules}
+            staffDirectory={staffDirectory}
+            pjShiftAssignments={pjShiftAssignments}
+          />
+        );
+      case 'laporan_bulanan':
+        return (
+          <MonthlyReportsPage
+            logbooks={allLogbooks}
+            staffDirectory={staffDirectory}
+            reports={allReports}
+            formTemplate={formTemplate}
+          />
+        );
+      case 'jadwal_dinas':
+        return (
+          <SchedulesPage
+            schedules={schedules}
+            pjShiftAssignments={pjShiftAssignments}
+            doctorSchedules={doctorSchedules}
+            doctors={doctors}
+            staffDirectory={staffDirectory}
+          />
+        );
+      case 'data_pasien':
+        return <PatientsPage patients={patients} />;
+      case 'data_dokter':
+        return <DoctorsPage doctors={doctors} />;
+      case 'data_mesin':
+        return <MachinesPage machines={machines} />;
+      case 'data_akun':
+        return <AccountsPage users={allUsers} />;
+      case 'my_account':
+        return <MyAccountPage />;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <>
+      <SidebarLayout
+        activeMenu={activeMenu}
+        onSelectMenu={setActiveMenu}
+        onPrefetchMenu={prefetchMenu}
+        pendingVerificationCount={pendingVerificationCount}
+        schedules={schedules}
+      >
+        <RoleGuard
+          menuId={activeMenu}
+          onBackToDashboard={() => setActiveMenu('dashboard')}
+        >
+          <Suspense fallback={<PageSkeleton />}>{renderPage()}</Suspense>
+        </RoleGuard>
+      </SidebarLayout>
+      {showWarning && (
+        <Suspense fallback={null}>
+          <IdleTimeoutModal
+            isOpen={showWarning}
+            remainingSeconds={remainingSeconds}
+            onExtend={resetActivity}
+            onLogoutNow={() => {
+              void logout();
+            }}
+          />
+        </Suspense>
+      )}
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <ToastProvider>
+        <AuthProvider>
+          <WorkspaceShell />
+          <OfflineIndicator />
+        </AuthProvider>
+      </ToastProvider>
+    </ErrorBoundary>
+  );
+}
